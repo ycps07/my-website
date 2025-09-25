@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>題庫搜尋小工具（公開版）</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 UMD + Babel for in-browser JSX transform -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState, Fragment } = React;
+
+    // ===== 型別移除版（純 JS）=====
+    const uid = () => Math.random().toString(36).slice(2, 9);
+    const normalize = (s) => (s || "").normalize("NFKC").trim();
+
+    // 只在偵測到「選項代號 + 分隔符」時才剝除
+    const stripPrefix = (line) => {
+      const s = (line || "").trimStart();
+      if (!s) return line;
+      const first = s[0];
+      const prefixes = "ABCDabcd１２３４①②③④1234";
+      if (!prefixes.includes(first)) return line;
+      const rest = s.slice(1);
+      if (!rest) return line;
+      const isDelimiter = (ch) => ch === ')' || ch === '.' || ch === '．' || ch === '、' || ch === '】' || ch === ' ' || ch === '\u3000';
+      if (!isDelimiter(rest[0])) return line;
+      let i = 0;
+      while (i < rest.length && isDelimiter(rest[i])) i++;
+      return rest.slice(i);
+    };
+
+    const parsePlainTextBank = (text) => {
+      const blocks = (text || "")
+        .replace(/\r\n?/g, "\n")
+        .split(/\n{2,}/)
+        .map((b) => b.trim())
+        .filter(Boolean);
+
+      const qas = [];
+      for (const block of blocks) {
+        const lines = block.split(/\n/).map((l) => l.trim()).filter(Boolean);
+        if (!lines.length) continue;
+        let qLine = lines[0].replace(/^Q\s*[:：】\-]?\s*/i, "");
+        const optionLines = lines.slice(1);
+        const options = optionLines.map((raw) => {
+          const isCorrect = /^\*/.test(raw);
+          const line = raw.replace(/^\*\s*/, "");
+          return { id: uid(), text: stripPrefix(line), isCorrect };
+        });
+        if (options.length === 0 && lines.length > 1) {
+          for (let i = 1; i < lines.length; i++) {
+            const raw = lines[i];
+            const isCorrect = /^\*/.test(raw);
+            const line = raw.replace(/^\*\s*/, "");
+            options.push({ id: uid(), text: stripPrefix(line), isCorrect });
+          }
+        }
+        const filtered = options.filter((o) => normalize(o.text).length > 0);
+        if (normalize(qLine).length === 0 || filtered.length === 0) continue;
+        qas.push({ id: uid(), question: qLine, options: filtered });
+      }
+      return qas;
+    };
+
+    const serializePlainTextBank = (data) =>
+      (data || [])
+        .map((q) => [
+          `Q: ${q.question}`,
+          ...q.options.map((o) => `${o.isCorrect ? "*" : ""}${o.text}`),
+        ].join("\n"))
+        .join("\n\n");
+
+    const saveToStorage = (data) => localStorage.setItem("qa-bank", JSON.stringify(data));
+    const loadFromStorage = () => {
+      try {
+        const raw = localStorage.getItem("qa-bank");
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const Highlighter = ({ text, query }) => {
+      if (!query) return <>{text}</>;
+      const q = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(q, "gi");
+      const parts = (text || "").split(re);
+      const matches = (text || "").match(re);
+      const nodes = [];
+      for (let i = 0; i < parts.length; i++) {
+        nodes.push(<span key={`p${i}`}>{parts[i]}</span>);
+        if (matches && i < matches.length) {
+          nodes.push(<mark key={`m${i}`} className="rounded px-1 bg-yellow-200">{matches[i]}</mark>);
+        }
+      }
+      return <>{nodes}</>;
+    };
+
+    const SEED_TEXT = `Q: 地價稅幾月份開徵？
+*11月
+9月
+10月
+8月
+
+Q: 雲端發票捐贈方式多元化，消費者可直接透過什麼捐贈發票給社福團體?
+信用卡
+健保卡
+*捐贈碼
+
+Q: 房屋稅幾月份開徵？
+4月
+2月
+*5月
+3月
+
+Q: 地價稅自用住宅用地優惠稅率2‰應於幾月幾日前申請？經核准當年即可適用。
+12月31日
+1月1日
+8月31日
+*9月22日
+
+Q: 下列哪一個是地價稅自用住宅優惠稅率的條件？
+適用面積都市土地≦3公畝、非都市土地≦7公畝。
+土地所有權人或配偶、直系親屬於該地辦竣戶籍登記。
+地上房屋必須是土地所有權人或配偶、直系親屬所有且沒有出租或營業使用。
+*以上皆是
+
+Q: 「男兒有淚不輕彈」，這句話所隱含的是一種性別角色的刻板印象。
+錯
+*對
+
+Q: 「稅籍異動即時通」在您申報土地增值稅及契稅收件時，會以簡訊、電子郵件或地方稅網路申報Line推播通知您。
+*對
+錯
+
+Q: 下列有關電子稅單的敘述，何者正確？
+可以線上(本局網站或地方稅網路申報作業網站)、臨櫃、郵寄等方式申辦。
+定期開徵的使用牌照稅、房屋稅及地價稅可申辦電子稅單。
+開徵前2個月提出申請，逾期申請則自次年期開始適用。
+*以上皆是。
+
+Q: 下列哪一個是房屋稅自住住家用稅率的條件？
+無出租或營業使用。
+本人、配偶及未成年子女全國合計3戶以內
+房屋所有人或配偶、直系親屬實際居住使用，且辦竣戶籍登記。
+*以上皆是`;
+
+    function Card({ children }) {
+      return <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">{children}</div>;
+    }
+
+    function Stats({ total, matched, query }) {
+      return (
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
+          <span className="inline-flex items-center rounded-full bg-slate-200 px-3 py-1">題庫：{total} 題</span>
+          <span className="inline-flex items-center rounded-full bg-blue-100 text-blue-700 px-3 py-1">
+            {query ? `搜尋命中：${matched} 題` : `顯示全部：${matched} 題`}
+          </span>
+        </div>
+      );
+    }
+
+    function Dialog({ title, onClose, children }) {
+      return (
+        <div className="fixed inset-0 z-20 grid place-items-center bg-black/30 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-3xl rounded-2xl bg-white p-4 shadow-lg">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-lg font-semibold">{title}</h3>
+              <button onClick={onClose} className="rounded-lg px-2 py-1 text-slate-600 hover:bg-slate-100">關閉</button>
+            </div>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [bank, setBank] = useState(() => {
+        const saved = loadFromStorage();
+        if (saved.length > 0) return saved;
+        return parsePlainTextBank(SEED_TEXT);
+      });
+      const [query, setQuery] = useState("");
+      const [pasteMode, setPasteMode] = useState(false);
+      const [editMode, setEditMode] = useState(false);
+      const [bulkMode, setBulkMode] = useState(false);
+      const bulkRef = useRef(null);
+      const pasteRef = useRef(null);
+
+      useEffect(() => { saveToStorage(bank); }, [bank]);
+
+      const filtered = useMemo(() => {
+        const q = normalize(query).toLowerCase();
+        if (!q) return bank;
+        return bank.filter((qa) => {
+          if (normalize(qa.question).toLowerCase().includes(q)) return true;
+          return qa.options.some((op) => normalize(op.text).toLowerCase().includes(q));
+        });
+      }, [bank, query]);
+
+      const importPlainText = () => {
+        const text = (pasteRef.current && pasteRef.current.value) || "";
+        if (!text.trim()) return;
+        const parsed = parsePlainTextBank(text);
+        if (parsed.length === 0) { alert("看起來沒有成功解析到題目，請確認格式。\n可參考上方說明與範例。"); return; }
+        setBank((prev) => [...prev, ...parsed]);
+        setPasteMode(false);
+        if (pasteRef.current) pasteRef.current.value = "";
+      };
+
+      const exportJSON = () => {
+        const blob = new Blob([JSON.stringify(bank, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `qa-bank-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const importJSON = (file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const parsed = JSON.parse(String(reader.result));
+            if (!Array.isArray(parsed)) throw new Error("格式錯誤");
+            const mapped = parsed.map((q) => ({
+              id: q.id || uid(),
+              question: String(q.question ?? "").trim(),
+              options: Array.isArray(q.options)
+                ? q.options.map((o) => ({ id: o.id || uid(), text: String(o.text ?? "").trim(), isCorrect: Boolean(o.isCorrect) }))
+                : [],
+            }));
+            setBank((prev) => [...prev, ...mapped]);
+          } catch (e) {
+            alert("JSON 解析失敗：" + e.message);
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      // 編輯工具
+      const moveItem = (arr, from, to) => { const copy = arr.slice(); const [sp] = copy.splice(from, 1); copy.splice(to, 0, sp); return copy; };
+      const updateQuestion = (qid, text) => setBank((prev) => prev.map((q) => (q.id === qid ? { ...q, question: text } : q)));
+      const addOptionTo = (qid) => setBank((prev) => prev.map((q) => (q.id === qid ? { ...q, options: [...q.options, { id: uid(), text: "", isCorrect: false }] } : q)));
+      const updateOption = (qid, oid, text) => setBank((prev) => prev.map((q) => (q.id === qid ? { ...q, options: q.options.map((o) => (o.id === oid ? { ...o, text } : o)) } : q)));
+      const toggleCorrect = (qid, oid) => setBank((prev) => prev.map((q) => (q.id === qid ? { ...q, options: q.options.map((o) => (o.id === oid ? { ...o, isCorrect: !o.isCorrect } : o)) } : q)));
+      const removeOptionFrom = (qid, oid) => setBank((prev) => prev.map((q) => (q.id === qid ? { ...q, options: q.options.filter((o) => o.id !== oid) } : q)));
+      const moveOptionIn = (qid, from, to) => setBank((prev) => prev.map((q) => (q.id === qid ? { ...q, options: moveItem(q.options, from, to) } : q)));
+      const removeQuestion = (qid) => setBank((prev) => prev.filter((q) => q.id !== qid));
+      const moveQuestion = (from, to) => setBank((prev) => moveItem(prev, from, to));
+
+      return (
+        <div className="min-h-screen">
+          <header className="sticky top-0 z-10 backdrop-blur bg-white/70 border-b border-slate-200">
+            <div className="max-w-6xl mx-auto px-4 py-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">🧰</span>
+                <h1 className="text-xl md:text-2xl font-bold tracking-tight">題庫搜尋小工具（公開版）</h1>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  placeholder="搜尋題目或選項關鍵字…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="w-64 md:w-96 rounded-2xl border border-slate-300 px-4 py-2 outline-none focus:ring-2 focus:ring-blue-400"
+                />
+                <button onClick={() => setPasteMode(true)} className="rounded-2xl px-3 py-2 bg-blue-600 text-white hover:bg-blue-700 shadow">貼上題庫</button>
+                <button onClick={() => setBulkMode(true)} className="rounded-2xl px-3 py-2 bg-indigo-600 text-white hover:bg-indigo-700 shadow">批次編輯</button>
+                <button onClick={() => setEditMode((v) => !v)} className={`rounded-2xl px-3 py-2 shadow ${editMode ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-amber-100 text-amber-900 hover:bg-amber-200'}`}>{editMode ? '編輯模式：開' : '編輯模式：關'}</button>
+                <button onClick={() => {
+                  const q = prompt("輸入題目：");
+                  if (!q) return;
+                  const opts = [];
+                  for (let i = 0; i < 4; i++) {
+                    const t = prompt(`輸入選項 ${String.fromCharCode(65 + i)}：`);
+                    if (t) opts.push({ id: uid(), text: t, isCorrect: false });
+                  }
+                  if (!opts.length) return;
+                  const correct = prompt("請輸入正確選項的字母（如 A）：");
+                  if (correct) {
+                    const idx = correct.trim().toUpperCase().charCodeAt(0) - 65;
+                    if (!isNaN(idx) && idx >= 0 && idx < opts.length) opts[idx].isCorrect = true;
+                  }
+                  setBank((prev) => [...prev, { id: uid(), question: q, options: opts }]);
+                }} className="rounded-2xl px-3 py-2 bg-emerald-600 text-white hover:bg-emerald-700 shadow">新增單題</button>
+                <button onClick={() => {
+                  const blob = new Blob([JSON.stringify(bank, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `qa-bank-${new Date().toISOString().slice(0, 10)}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }} className="rounded-2xl px-3 py-2 bg-slate-800 text-white hover:bg-slate-900 shadow">下載 JSON</button>
+                <label className="cursor-pointer rounded-2xl px-3 py-2 bg-slate-200 hover:bg-slate-300 shadow">匯入 JSON
+                  <input type="file" accept="application/json" className="hidden" onChange={(e) => {
+                    const file = e.target.files && e.target.files[0];
+                    if (file) importJSON(file);
+                    e.currentTarget.value = "";
+                  }} />
+                </label>
+                <button onClick={() => { if (confirm('確定要清除所有題目嗎？此動作無法復原。')) { setBank([]); localStorage.removeItem('qa-bank'); } }} className="rounded-2xl px-3 py-2 bg-rose-600 text-white hover:bg-rose-700 shadow">清除全部</button>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-6xl mx-auto px-4 py-6">
+            <Stats total={bank.length} matched={filtered.length} query={query} />
+
+            {filtered.length === 0 ? (
+              <Card>
+                <div className="text-center py-8">
+                  <p className="text-slate-600">目前沒有題目。先用「貼上題庫」或「新增單題」吧！</p>
+                </div>
+              </Card>
+            ) : (
+              <ul className="grid gap-4">
+                {filtered.map((qa, idx) => (
+                  <li key={qa.id}>
+                    <Card>
+                      {!editMode ? (
+                        <>
+                          <div className="flex items-start justify-between gap-4">
+                            <h2 className="text-lg font-semibold leading-snug">
+                              <span className="mr-2 text-slate-400 select-none">#{idx + 1}</span>
+                              <Highlighter text={qa.question} query={query} />
+                            </h2>
+                          </div>
+                          <ul className="mt-3 grid gap-2">
+                            {qa.options.map((op, i) => (
+                              <li key={op.id} className={`flex items-start gap-2 rounded-xl border px-3 py-2 ${op.isCorrect ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200 bg-white'}`}>
+                                <span className={`inline-flex h-6 w-6 select-none items-center justify-center rounded-full text-sm font-bold ${op.isCorrect ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                                  {String.fromCharCode(65 + i)}
+                                </span>
+                                <p className="leading-relaxed">
+                                  <Highlighter text={op.text} query={query} />
+                                  {op.isCorrect && (
+                                    <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">正確答案</span>
+                                  )}
+                                </p>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <label className="text-xs text-slate-500">題目</label>
+                              <input value={qa.question} onChange={(e) => updateQuestion(qa.id, e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-amber-400" />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button onClick={() => idx>0 && moveQuestion(idx, idx-1)} className="rounded-xl px-3 py-2 bg-slate-200 hover:bg-slate-300">上移題目</button>
+                              <button onClick={() => idx<bank.length-1 && moveQuestion(idx, idx+1)} className="rounded-xl px-3 py-2 bg-slate-200 hover:bg-slate-300">下移題目</button>
+                              <button onClick={() => removeQuestion(qa.id)} className="rounded-xl px-3 py-2 bg-rose-100 text-rose-700 hover:bg-rose-200">刪除此題</button>
+                            </div>
+                          </div>
+                          <ul className="mt-3 grid gap-2">
+                            {qa.options.map((op, i) => (
+                              <li key={op.id} className="rounded-xl border border-slate-200 bg-slate-50 p-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="inline-flex h-7 w-7 select-none items-center justify-center rounded-full bg-slate-300 text-sm font-bold text-slate-800">{String.fromCharCode(65 + i)}</span>
+                                  <input value={op.text} onChange={(e) => updateOption(qa.id, op.id, e.target.value)} className="flex-1 rounded-lg border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-amber-400" />
+                                  <label className="inline-flex items-center gap-1 text-sm"><input type="checkbox" checked={op.isCorrect} onChange={() => toggleCorrect(qa.id, op.id)} /> 正確</label>
+                                  <button onClick={() => i>0 && moveOptionIn(qa.id, i, i-1)} className="rounded-lg px-2 py-1 bg-slate-200 hover:bg-slate-300">上移</button>
+                                  <button onClick={() => i<qa.options.length-1 && moveOptionIn(qa.id, i, i+1)} className="rounded-lg px-2 py-1 bg-slate-200 hover:bg-slate-300">下移</button>
+                                  <button onClick={() => removeOptionFrom(qa.id, op.id)} className="rounded-lg px-2 py-1 bg-rose-100 text-rose-700 hover:bg-rose-200">刪除</button>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                          <div className="mt-2">
+                            <button onClick={() => addOptionTo(qa.id)} className="rounded-xl px-3 py-2 bg-emerald-600 text-white hover:bg-emerald-700">＋新增選項</button>
+                          </div>
+                          <p className="mt-2 text-xs text-amber-700">（編輯模式會自動儲存到瀏覽器）</p>
+                        </>
+                      )}
+                    </Card>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </main>
+
+          {pasteMode && (
+            <Dialog onClose={() => setPasteMode(false)} title="貼上題庫（純文字）">
+              <div className="space-y-3">
+                <p className="text-sm text-slate-600">將題庫貼在下方，* 置於正確選項前。空一行代表下一題。</p>
+                <pre className="text-xs bg-slate-100 p-3 rounded-lg overflow-x-auto">{`Q: 三角形內角和為多少？\nA) 90 度\n*B) 180 度\nC) 270 度\nD) 360 度\n\nQ: CSS 的作用是？\n*A) 設計樣式\nB) 資料庫查詢\nC) 網路傳輸\nD) 作業系統`}</pre>
+                <textarea ref={pasteRef} rows={12} className="w-full rounded-xl border border-slate-300 p-3 focus:ring-2 focus:ring-blue-400" placeholder="在此貼上題庫…" />
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setPasteMode(false)} className="rounded-xl px-4 py-2 bg-slate-200 hover:bg-slate-300">取消</button>
+                  <button onClick={importPlainText} className="rounded-xl px-4 py-2 bg-blue-600 text-white hover:bg-blue-700">解析並加入</button>
+                </div>
+              </div>
+            </Dialog>
+          )}
+
+          {bulkMode && (
+            <Dialog onClose={() => setBulkMode(false)} title="批次編輯題庫（純文字）">
+              <div className="space-y-3">
+                <p className="text-sm text-slate-600">可直接編修下方文字，格式同貼上題庫：每題以空白行分隔、正確答案前加 *。</p>
+                <textarea ref={bulkRef} defaultValue={serializePlainTextBank(bank)} rows={16} className="w-full rounded-xl border border-slate-300 p-3 focus:ring-2 focus:ring-indigo-400" />
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setBulkMode(false)} className="rounded-xl px-4 py-2 bg-slate-200 hover:bg-slate-300">取消</button>
+                  <button onClick={() => { const text = (bulkRef.current && bulkRef.current.value) || ""; const parsed = parsePlainTextBank(text); if (parsed.length === 0) { alert("沒有解析到題目，請確認格式（每題之間空一行，正確前加 *）。"); return; } setBank(parsed); setBulkMode(false); }} className="rounded-xl px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700">覆蓋目前題庫</button>
+                </div>
+              </div>
+            </Dialog>
+          )}
+
+          <footer className="max-w-6xl mx-auto px-4 py-10 text-center text-sm text-slate-500">這是單檔前端小工具，資料只保存在瀏覽器（LocalStorage）。</footer>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
